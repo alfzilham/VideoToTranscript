@@ -34,6 +34,7 @@ outputs/
 Thumbs.db
 .vscode/
 .idea/
+desktop.ini
 
 # Agents
 graphify-out/
