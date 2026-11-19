@@ -1,0 +1,45 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node.js / Next.js
+node_modules/
+.next/
+out/
+dist/
+build/
+*.tsbuildinfo
+npm-debug.log*
+.pnpm-store/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+!.env.local.example
+
+# Temporary files and generated outputs
+tmp/
+temp/
+outputs/
+*.log
+
+# Operating system and IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Agents
+graphify-out/
+.claude/
+.python-version
+main.py
+pyproject.toml
+uv.lock
+.venv
