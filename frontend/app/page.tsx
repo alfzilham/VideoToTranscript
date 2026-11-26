@@ -1,10 +1,10 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import Image from "next/image";
 import InputForm from "@/components/InputForm";
 import ProgressIndicator from "@/components/ProgressIndicator";
 import TranscriptResult from "@/components/TranscriptResult";
+import TopBar from "@/components/TopBar";
 import { API_URL, checkedResponse } from "@/lib/api";
 import type { Model, StatusResponse, TranscriptResponse } from "@/lib/api";
 
@@ -18,8 +18,15 @@ export default function Home() {
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [result, setResult] = useState<TranscriptResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [restored, setRestored] = useState(false);
   const busy = submitting || jobId !== null;
   const pollFailures = useRef(0);
+
+  useEffect(() => {
+    const savedJob = window.localStorage.getItem("vtt:transcription:jobId");
+    if (savedJob) setJobId(savedJob);
+    setRestored(true);
+  }, []);
 
   async function submit(input: InputPayload) {
     if (busy) return;
@@ -44,6 +51,7 @@ export default function Home() {
         response = await fetch(`${API_URL}/api/process/upload`, { method: "POST", body: formData });
       }
       const data = await checkedResponse<{ job_id: string }>(response);
+      window.localStorage.setItem("vtt:transcription:jobId", data.job_id);
       setJobId(data.job_id);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Gagal mengirim permintaan.");
@@ -71,6 +79,7 @@ export default function Home() {
         if (next.status === "error") {
           setError(next.error_message || "Proses transkripsi gagal.");
           setJobId(null);
+          window.localStorage.removeItem("vtt:transcription:jobId");
           return;
         }
         if (next.status === "done") {
@@ -80,6 +89,7 @@ export default function Home() {
           if (!live) return;
           setResult(final);
           setJobId(null);
+          window.localStorage.removeItem("vtt:transcription:jobId");
           return;
         }
       } catch (cause) {
@@ -88,6 +98,7 @@ export default function Home() {
         if (pollFailures.current >= 4) {
           setError(cause instanceof Error ? `Koneksi backend gagal: ${cause.message}` : "Koneksi backend terputus.");
           setJobId(null);
+          window.localStorage.removeItem("vtt:transcription:jobId");
           return;
         }
       }
@@ -104,12 +115,10 @@ export default function Home() {
 
   return (
     <main className="app-shell">
+      <TopBar />
       <header className="app-header">
         <span className="app-eyebrow">LOCAL WORKSPACE / SPEECH-TO-TEXT</span>
-        <div className="app-brand">
-          <Image className="brand-mark" src="/logo.webp" alt="" width={68} height={68} priority />
-          <h1>Video to Transcript<span className="title-dot">.</span></h1>
-        </div>
+        <div className="app-brand"><h1>Video to Transcript<span className="title-dot">.</span></h1></div>
         <p className="app-intro">Ubah video menjadi teks bertimestamp, langsung siap digunakan sebagai konteks percakapan AI.</p>
         <div className="app-meta"><span className="meta-indicator" /> 100% diproses di perangkat Anda <span className="meta-divider">/</span> CPU-only</div>
       </header>
@@ -123,7 +132,7 @@ export default function Home() {
         </section>
       )}
       <TranscriptResult key={result?.filename_suggestion ?? "none"} result={result} />
-      {!result && !busy && !error && (
+      {restored && !result && !busy && !error && (
         <section className="empty-result" aria-label="Hasil transcript belum tersedia">
           <span className="empty-symbol" aria-hidden="true">[ 00:00:00 ]</span>
           <p>Transcript Anda akan muncul di sini setelah video diproses.</p>
