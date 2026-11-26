@@ -14,6 +14,14 @@ body { margin: 0; background: var(--paper); color: var(--ink); font-family: Aria
 button, input, select { font: inherit; }
 button:focus-visible, input:focus-visible, select:focus-visible, pre:focus-visible { outline: 3px solid #767676; outline-offset: 3px; }
 .app-shell { max-width: 800px; margin: 0 auto; padding: 68px 24px 38px; }
+.topbar { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin: -36px 0 38px; padding: 0 2px; }
+.topbar-brand { display: inline-flex; align-items: center; flex: 0 0 auto; }
+.topbar-brand img { display: block; width: 36px; height: 36px; object-fit: contain; }
+.topbar-links { display: flex; align-items: center; gap: 24px; border-bottom: 1px solid var(--line); }
+.topbar-link { display: inline-flex; align-items: center; min-height: 40px; margin-bottom: -1px; border-bottom: 2px solid transparent; color: #777; text-decoration: none; font-weight: 600; font-size: 13px; }
+.topbar-link:hover { color: var(--ink); }
+.topbar-link-active { border-bottom-color: var(--ink); color: var(--ink); }
+.topbar-link:focus-visible, .text-action:focus-visible, .action-link:focus-visible { outline: 3px solid #767676; outline-offset: 3px; }
 .app-header { padding: 0 2px 35px; }
 .app-eyebrow { display: inline-block; font: 700 11px/1.4 Arial, sans-serif; color: #575757; letter-spacing: 1.45px; }
 .app-brand { display: flex; align-items: center; gap: 18px; margin: 17px 0 16px; min-width: 0; }
@@ -75,7 +83,41 @@ h1 { font-size: clamp(34px, 6vw, 48px); line-height: 1.05; letter-spacing: -1.85
 .empty-result p { margin: 0; font-size: 12px; line-height: 1.5; }
 .footer { padding-top: 36px; color: #999; font-size: 11px; text-align: center; letter-spacing: .1px; }
 .footer span { padding: 0 7px; }
+.downloader-url-field { margin-top: 24px; }
+.downloader-submit { margin-top: 23px; }
+.source-thumbnail { display: block; width: min(100%, 520px); max-height: 290px; object-fit: contain; background: #eee; border-radius: 8px; margin: 22px 0; }
+.source-facts { display: flex; flex-wrap: wrap; gap: 12px 24px; margin: 21px 0; font-size: 13px; color: #444; }
+.quality-select-field { margin: 20px 0 14px; }
+.quality-select-field select, .transcript-send-panel select { width: min(100%, 380px); border: 1px solid #cfcfce; border-radius: 8px; background: #fff; color: #222; min-height: 46px; padding: 0 14px; }
+.source-message { display: block; margin: 13px 0 18px; }
+.cancel-button { margin-top: 17px; }
+.progress-indeterminate { width: 35%; animation: vtt-progress 1.3s ease-in-out infinite alternate; }
+@keyframes vtt-progress { from { transform: translateX(-20%); } to { transform: translateX(190%); } }
+.download-preview { display: block; width: 100%; max-height: 440px; background: #111; border-radius: 8px; margin: 24px 0; }
+.quality-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 22px; margin: 0 0 24px; border-top: 1px solid var(--line); }
+.quality-grid > div { min-width: 0; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.quality-grid dt { color: var(--muted); font-size: 11px; margin-bottom: 5px; }
+.quality-grid dd { margin: 0; font-size: 13px; overflow-wrap: anywhere; font-family: ui-monospace, Consolas, monospace; }
+.action-link { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; }
+.history-panel { margin-top: 18px; }
+.history-refresh { min-height: 36px; padding: 8px 13px; font-size: 12px; }
+.history-empty { display: block; margin-top: 20px; }
+.history-list { list-style: none; margin: 18px 0 0; padding: 0; }
+.history-list li { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 16px 0; border-top: 1px solid var(--line); }
+.history-item-main { display: flex; flex-direction: column; min-width: 0; gap: 5px; }
+.history-item-main strong { font-size: 13px; overflow-wrap: anywhere; }
+.history-item-main span, .history-item-main time { color: var(--muted); font-size: 11px; }
+.history-actions { display: flex; align-items: center; gap: 12px; flex: 0 0 auto; }
+.text-action { border: 0; padding: 4px; background: transparent; color: #333; font-weight: 700; font-size: 11px; text-decoration: underline; cursor: pointer; }
+.transcript-send-panel { padding: 20px 24px; }
+.transcript-send-panel .field { gap: 8px; }
 @media (max-width: 640px) {
+  .topbar { margin: -14px 0 30px; align-items: flex-start; }
+  .topbar-links { gap: 13px; }
+  .topbar-link { font-size: 12px; }
+  .quality-grid { grid-template-columns: 1fr; }
+  .history-list li { align-items: flex-start; flex-direction: column; }
+  .history-actions { align-self: flex-end; }
   .app-shell { padding: 38px 16px 28px; }
   .app-header { padding-bottom: 28px; }
   .app-brand { gap: 12px; }
