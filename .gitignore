@@ -27,6 +27,7 @@ npm-debug.log*
 tmp/
 temp/
 outputs/
+downloads/
 *.log
 
 # Operating system and IDE
@@ -41,6 +42,7 @@ graphify-out/
 .claude/
 .python-version
 main.py
+!backend/main.py
 pyproject.toml
 uv.lock
 .venv
