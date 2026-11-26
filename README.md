@@ -23,6 +23,7 @@ Hasil dapat disalin dengan satu klik atau diunduh sebagai file `.txt` untuk dibe
 - **Node.js 18.18+** (atau Node.js 20/22 LTS) dan npm. Next.js 15 memerlukan paling sedikit Node.js 18.18.
 - **ffmpeg** harus terpasang dan tersedia di `PATH` sistem.
 - Koneksi internet untuk menginstal dependensi, mengunduh video YouTube, dan **mengunduh model Whisper pertama kali**. Setelah model di-cache, transkripsi file lokal dapat dilakukan secara offline.
+- Video Downloader YouTube menggunakan Pytubefix dari `backend/requirements.txt`; pipeline transkripsi YouTube yang ada tetap memakai yt-dlp.
 - Disarankan RAM minimal 8 GB. Model `medium` mengonsumsi RAM dan waktu CPU lebih banyak daripada `small`.
 - Penyimpanan sementara yang cukup untuk file video dan hasil WAV. Batas upload default 2 GiB.
 
@@ -122,15 +123,42 @@ Jika batas ukuran backend diubah, **sesuaikan `NEXT_PUBLIC_MAX_UPLOAD_BYTES`** a
 | `GET` | `/api/status/{job_id}` | `status`, `progress` (0–100), `error_message` |
 | `GET` | `/api/result/{job_id}` | Hasil `transcript` dan `filename_suggestion` saat status `done` |
 
+Downloader endpoints use the `/api/downloader` prefix. See [docs/VIDEO_DOWNLOADER_API.md](docs/VIDEO_DOWNLOADER_API.md) for inspection, download, status, validation, preview, history, cancellation, and transcript handoff routes.
+
 Hanya satu job boleh aktif. Permintaan baru ketika job masih berjalan mendapat respons HTTP `409`. Progres transkripsi berbasis segmen dan merupakan **perkiraan**, bukan ETA. Hasil tersimpan di memori sampai server backend dihentikan; media sementara dibersihkan otomatis setelah selesai/gagal.
 
-## 7. Test
+## 7. Video Downloader
 
-Dari root, setelah instalasi dependensi backend:
+Buka halaman **Video Downloader** dari navigasi atas untuk memeriksa dan mengunduh file video langsung dari URL publik. File disimpan persisten di `downloads/YYYY-MM-DD/<job-id>/`; setiap hasil yang selesai memiliki `manifest.json`, metadata FFprobe, hasil full decode, dan SHA-256. File selesai tidak dihapus otomatis dan folder `downloads/` diabaikan Git.
+
+Downloader mempertahankan byte sumber langsung tanpa transkode. Untuk URL file langsung, rincian codec, resolusi, FPS, durasi, dan bitrate bisa belum tersedia sampai file selesai diunduh dan diperiksa. Browser yang tidak mendukung codec tetap dapat mengunduh file asli.
+
+Provider YouTube, Twitch, Whop, Google Drive, dan HLS/DASH dapat dikenali tetapi belum memiliki alur unduhan terotorisasi yang dikonfigurasi di aplikasi ini. Halaman akan menjelaskan keterbatasannya. Fitur ini tidak menggunakan fallback yt-dlp; pipeline transkripsi YouTube yang ada tetap terpisah dan tidak berubah. Jangan gunakan URL ke konten yang tidak berhak Anda akses.
+
+Pengaturan opsional backend (environment variables saat menjalankan dari root proyek):
+
+| Variabel | Default | Keterangan |
+|---|---:|---|
+| `VTT_DOWNLOAD_DIR` | `downloads` | Lokasi media dan manifest; relative path dihitung dari working directory proses backend |
+| `VTT_DOWNLOAD_MAX_BYTES` | `10737418240` | Batas ukuran unduhan (10 GiB) |
+| `VTT_DOWNLOAD_MAX_CONCURRENT` | `1` | Jumlah job downloader aktif |
+| `VTT_DOWNLOAD_INSPECTION_TTL` | `900` | Masa berlaku hasil inspeksi (detik) |
+
+Tidak diperlukan dependency Python tambahan untuk direct-file adapter. `ffmpeg` dan `ffprobe` yang digunakan pipeline aplikasi juga menjalankan validasi hasil unduhan.
+
+## 8. Test
+
+Dari root, setelah instalasi dependensi backend dan dev:
 
 ```bash
-pip install pytest httpx
+pip install -r backend/requirements-dev.txt
 python -m pytest backend/tests -q
+```
+
+Tes inti downloader yang offline juga dapat dijalankan tanpa pytest:
+
+```powershell
+.\backend\.venv\Scripts\python.exe -m unittest discover -s backend\tests -p test_downloader.py -v
 ```
 
 Tes API berjalan offline dengan mock ekstraksi dan transkripsi; **tidak** mengukur kualitas model asli. Periksa tipe frontend dengan:
@@ -150,13 +178,20 @@ npm run build
 
 **Catatan:** Pengujian end-to-end dengan Whisper asli dan YouTube membutuhkan model, file media nyata, dan koneksi internet; tes otomatis offline tidak menggantikannya. Kinerja pada Ryzen 7 5825U CPU-only sangat bergantung pada durasi dan kualitas audio.
 
-## 8. Struktur proyek
+## 9. Struktur proyek
 
 ```text
 video-to-transcript/
 ├── backend/
 │   ├── main.py
 │   ├── jobs.py
+│   ├── downloader/
+│   │   ├── adapters/
+│   │   ├── jobs.py
+│   │   ├── router.py
+│   │   ├── security.py
+│   │   ├── storage.py
+│   │   └── validator.py
 │   ├── pipeline/
 │   │   ├── downloader.py
 │   │   ├── extractor.py
@@ -179,7 +214,12 @@ video-to-transcript/
 │   ├── SPEC.md
 │   ├── ARCHITECTURE.md
 │   ├── DESIGN.md
-│   └── WORKFLOW.md
+│   ├── WORKFLOW.md
+│   ├── VIDEO_DOWNLOADER_SPEC.md
+│   ├── VIDEO_DOWNLOADER_ARCHITECTURE.md
+│   ├── VIDEO_DOWNLOADER_API.md
+│   ├── VIDEO_DOWNLOADER_WORKFLOW.md
+│   └── VIDEO_DOWNLOADER_QA.md
 ├── LICENSE
 └── README.md
 ```
