@@ -133,7 +133,46 @@ Buka halaman **Video Downloader** dari navigasi atas untuk memeriksa dan mengund
 
 Downloader mempertahankan byte sumber langsung tanpa transkode. Untuk URL file langsung, rincian codec, resolusi, FPS, durasi, dan bitrate bisa belum tersedia sampai file selesai diunduh dan diperiksa. Browser yang tidak mendukung codec tetap dapat mengunduh file asli.
 
-Provider YouTube, Twitch, Whop, Google Drive, dan HLS/DASH dapat dikenali tetapi belum memiliki alur unduhan terotorisasi yang dikonfigurasi di aplikasi ini. Halaman akan menjelaskan keterbatasannya. Fitur ini tidak menggunakan fallback yt-dlp; pipeline transkripsi YouTube yang ada tetap terpisah dan tidak berubah. Jangan gunakan URL ke konten yang tidak berhak Anda akses.
+Downloader mendukung YouTube melalui Pytubefix, HLS/DASH VOD statis yang tidak terenkripsi, direct media URL, Twitch Clips dengan token editor/broadcaster berizin, dan Google Drive melalui OAuth/API resmi. [Whop berstatus `SKIPPED_BY_OWNER`](docs/VIDEO_DOWNLOADER_SPEC.md). Fitur ini tidak menggunakan fallback yt-dlp; pipeline transkripsi YouTube tetap terpisah. Jangan gunakan URL ke konten yang tidak berhak Anda akses.
+
+### Status UAT platform
+
+| Platform | Status final |
+|---|---|
+| Direct HTTP(S) | PASS |
+| YouTube | PASS |
+| Google Drive | PASS |
+| Twitch Clips | OPTIONAL — autentikasi dapat lulus; unduh dibatasi izin editor/broadcaster untuk channel target |
+| HLS VOD | PASS |
+| DASH VOD | PASS |
+| Whop | SKIPPED_BY_OWNER |
+
+**Production readiness:** PASS untuk workflow yang didukung. Twitch adalah fitur opsional dan pembatasan otorisasi target tidak menghalangi status produksi. Edge telah memutar preview URL direct MP4 sampai selesai dengan byte-range headers yang valid; detail bukti ada di [QA record](docs/VIDEO_DOWNLOADER_QA.md).
+
+**Twitch:** autentikasi dan scope dapat berhasil, tetapi Clip tertentu hanya dapat diunduh melalui endpoint resmi saat pengguna token berwenang sebagai editor/broadcaster channel tersebut. Autentikasi saja tidak menjamin akses. Tidak ada fallback scraping pihak ketiga.
+
+Untuk Google Drive, siapkan OAuth Desktop client di Google Cloud, set `VTT_GOOGLE_DRIVE_OAUTH_CLIENT_FILE`, lalu jalankan `python -m backend.downloader.google_drive_auth` dari root proyek. Browser akan meminta consent `drive.readonly`; lanjutkan di Google hanya jika setuju aplikasi lokal ini dapat membaca file Drive yang diizinkan akunmu. Token disimpan lokal di luar repo secara default.
+
+Untuk Twitch Clips, daftarkan aplikasi Twitch dengan jenis public/device-code, set `VTT_TWITCH_CLIENT_ID`, lalu jalankan `python -m backend.downloader.twitch_auth` dari root proyek. Device Code Flow resmi meminta scope `editor:manage:clips`; selesaikan kode dan consent di Twitch menggunakan akun editor/broadcaster yang berwenang. Access/refresh token ditulis ke `~/.video-to-transcript/twitch-token.json` dan diperbarui otomatis; jangan bagikan atau commit file tersebut. `VTT_TWITCH_ACCESS_TOKEN` tetap tersedia untuk konfigurasi token manual.
+
+HLS/DASH hanya menerima VOD publik tanpa DRM/enkripsi; live stream dan format manifest yang belum didukung akan ditolak. Adapter menyalin media dan melakukan mux Matroska tanpa re-encoding.
+
+### Menjalankan layanan dengan `vtt-activate`
+
+Pada PowerShell yang memiliki function VTT di `$PROFILE`, jalankan:
+
+```powershell
+. $PROFILE
+vtt-activate
+```
+
+Function ini membuka tab Windows Terminal untuk backend di `127.0.0.1:8000` dan frontend di `localhost:3000`. Buka `http://127.0.0.1:3000`. Jika startup melaporkan port sedang digunakan, periksa pemilik port sebelum menghentikan proses apa pun. API lokal tidak memiliki autentikasi; jangan expose ke LAN/internet.
+
+### VTT sebagai penyedia video/transkrip untuk external Clipper Agent
+
+VTT dapat menyediakan sumber video asli dan metadata terverifikasi kepada Clipper Agent terpisah yang berjalan pada komputer yang sama. Agent memakai API `POST /api/downloader/inspect`, `POST /api/downloader/download`, `GET /api/downloader/status/{job_id}`, dan `GET /api/downloader/result/{job_id}`. Result berisi `file_url`, `preview_url`, metadata FFprobe, hasil full decode, serta SHA-256; file tersimpan di `downloads/YYYY-MM-DD/<job_id>/`. Setelah Agent membuat clip, ia dapat meminta transkrip melalui `POST /api/downloader/transcribe/{download_id}` lalu memakai API status/result transcription. Lihat contoh lengkap dan JSON di [API contract](docs/VIDEO_DOWNLOADER_API.md).
+
+Integrasi ini menggunakan API localhost tanpa autentikasi dan tidak memberi Agent akses jarak jauh. Jangan membuka port API ke jaringan. Gunakan hanya sumber yang Anda berhak akses.
 
 Pengaturan opsional backend (environment variables saat menjalankan dari root proyek):
 
@@ -143,8 +182,13 @@ Pengaturan opsional backend (environment variables saat menjalankan dari root pr
 | `VTT_DOWNLOAD_MAX_BYTES` | `10737418240` | Batas ukuran unduhan (10 GiB) |
 | `VTT_DOWNLOAD_MAX_CONCURRENT` | `1` | Jumlah job downloader aktif |
 | `VTT_DOWNLOAD_INSPECTION_TTL` | `900` | Masa berlaku hasil inspeksi (detik) |
+| `VTT_TWITCH_CLIENT_ID` | — | Twitch application Client ID untuk Clip API |
+| `VTT_TWITCH_ACCESS_TOKEN` | — | Twitch User Access Token untuk editor/broadcaster berwenang |
+| `VTT_TWITCH_TOKEN_FILE` | `~/.video-to-transcript/twitch-token.json` | Access/refresh token Twitch lokal dari Device Code Flow |
+| `VTT_GOOGLE_DRIVE_OAUTH_CLIENT_FILE` | — | Lokasi file OAuth Desktop client JSON |
+| `VTT_GOOGLE_DRIVE_TOKEN_FILE` | `~/.video-to-transcript/google-drive-token.json` | Lokasi token OAuth lokal |
 
-Tidak diperlukan dependency Python tambahan untuk direct-file adapter. `ffmpeg` dan `ffprobe` yang digunakan pipeline aplikasi juga menjalankan validasi hasil unduhan.
+Dependensi downloader terdaftar dalam `backend/requirements.txt`; `ffmpeg` dan `ffprobe` harus tersedia di `PATH` untuk mux dan validasi hasil.
 
 ## 8. Test
 
