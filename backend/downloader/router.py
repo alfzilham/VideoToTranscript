@@ -106,7 +106,9 @@ def download_source(request: DownloadRequest):
         refreshed = adapter.inspect(info["url"])
         if request.format_id not in {fmt.format_id for fmt in refreshed.formats}:
             _error(422, "QUALITY_UNAVAILABLE", "Format yang dipilih sudah tidak tersedia. Periksa ulang sumber.")
-        if hasattr(refreshed, "selected_format_id"):
+        if hasattr(refreshed, "select_format"):
+            refreshed.select_format(request.format_id)
+        elif hasattr(refreshed, "selected_format_id"):
             refreshed.selected_format_id = request.format_id
             selected = next(fmt for fmt in refreshed.formats if fmt.format_id == request.format_id)
             if selected.container and info["filename"]:
@@ -116,6 +118,8 @@ def download_source(request: DownloadRequest):
         info["filename"] = refreshed.filename
         info["size_bytes"] = refreshed.size_bytes
         job = manager.create_and_start(info, adapter, request.format_id)
+    except HTTPException:
+        raise
     except RuntimeError as exc:
         if str(exc) == "JOB_BUSY":
             _error(409, "JOB_BUSY", "Downloader sedang memproses video lain. Tunggu hingga selesai.")
