@@ -126,7 +126,7 @@ class YouTubeAdapter:
                 ffmpeg = shutil.which("ffmpeg")
                 if not ffmpeg:
                     raise RuntimeError("FFmpeg diperlukan untuk menggabungkan track audio/video tanpa re-encoding.")
-                proc = subprocess.Popen([ffmpeg, "-nostdin", "-y", "-i", str(video_path), "-i", str(audio_path), "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-movflags", "+faststart", str(destination)], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                proc = subprocess.Popen([ffmpeg, "-nostdin", "-y", "-i", str(video_path), "-i", str(audio_path), "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-f", "matroska", str(destination)], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
                 while proc.poll() is None:
                     if cancel_event.wait(0.2):
                         proc.terminate()
