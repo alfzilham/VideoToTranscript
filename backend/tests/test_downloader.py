@@ -43,6 +43,66 @@ class FakeResponse:
 
 
 class DownloaderCoreTests(unittest.TestCase):
+    def test_blank_provider_token_paths_use_user_data_defaults(self):
+        from backend.downloader.adapters.google_drive import _credentials
+        from backend.downloader.adapters.twitch import TwitchAdapter
+
+        with patch.dict("os.environ", {
+            "VTT_TWITCH_TOKEN_FILE": "",
+            "VTT_GOOGLE_DRIVE_TOKEN_FILE": "",
+        }, clear=False):
+            self.assertEqual(TwitchAdapter().token_file, Path.home() / ".video-to-transcript" / "twitch-token.json")
+            with patch.dict("os.environ", {"VTT_GOOGLE_DRIVE_OAUTH_CLIENT_FILE": ""}):
+                with self.assertRaisesRegex(RuntimeError, "OAUTH_CLIENT_FILE"):
+                    _credentials()
+
+    def test_google_drive_urls_extract_only_file_ids(self):
+        from backend.downloader.adapters.google_drive import extract_drive_file_id
+
+        self.assertEqual(extract_drive_file_id("https://drive.google.com/file/d/Abcdef_12345/view"), "Abcdef_12345")
+        self.assertEqual(extract_drive_file_id("https://drive.google.com/open?id=Abcdef_12345"), "Abcdef_12345")
+        with self.assertRaises(ValueError):
+            extract_drive_file_id("https://evil.example/file/d/Abcdef_12345")
+
+    def test_twitch_clip_slug_accepts_official_hosts_only(self):
+        from backend.downloader.adapters.twitch import _clip_slug
+
+        self.assertEqual(_clip_slug("https://clips.twitch.tv/SomeClip-123"), "SomeClip-123")
+        self.assertEqual(_clip_slug("https://www.twitch.tv/channel/clip/SomeClip_123"), "SomeClip_123")
+        with self.assertRaises(ValueError):
+            _clip_slug("https://evilclips.twitch.tv/SomeClip-123")
+
+    def test_hls_master_selects_highest_quality_and_rejects_live(self):
+        from backend.downloader.adapters import hls_dash
+
+        master = """#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,CODECS="avc1.4d401e,mp4a.40.2"
+low.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=4000000,RESOLUTION=1920x1080,FRAME-RATE=30,CODECS="avc1.640028,mp4a.40.2"
+high.m3u8
+"""
+        with patch.object(hls_dash, "_playlist", return_value=(master.splitlines(), "https://cdn.example/master.m3u8")), \
+             patch.object(hls_dash, "_media_playlist_choice", side_effect=[(["low.ts"], 5.0, ""), (["high.ts"], 5.0, "")]):
+            formats, choices, duration = hls_dash._parse_hls("https://cdn.example/master.m3u8")
+        self.assertEqual(formats[0].width, 1920)
+        self.assertEqual(choices[formats[0].format_id].video_segments, ["high.ts"])
+        self.assertEqual(duration, 5.0)
+        with patch.object(hls_dash, "_playlist", return_value=(["#EXTM3U", "segment.ts"], "https://cdn.example/live.m3u8")):
+            with self.assertRaisesRegex(ValueError, "Live or incomplete"):
+                hls_dash._media_playlist_choice("https://cdn.example/live.m3u8")
+
+    def test_dash_template_expands_sequence_with_init_segment(self):
+        import xml.etree.ElementTree as ET
+        from backend.downloader.adapters.hls_dash import _dash_rep_segments
+
+        xml = ET.fromstring("""<MPD><Period><AdaptationSet><Representation id="v1" bandwidth="800000"><BaseURL>https://cdn.example/video/</BaseURL><SegmentTemplate initialization="init-$RepresentationID$.m4s" media="chunk-$Number%03d$-$Time$.m4s" duration="4" timescale="1" startNumber="7"/></Representation></AdaptationSet></Period></MPD>""")
+        root, period, adaptation, rep = xml, xml.find("Period"), xml.find("Period/AdaptationSet"), xml.find("Period/AdaptationSet/Representation")
+        root.set("_source_url", "https://cdn.example/manifest.mpd")
+        urls, init, ext = _dash_rep_segments(root, period, adaptation, rep, 9)
+        self.assertEqual(init, "https://cdn.example/video/init-v1.m4s")
+        self.assertEqual(urls, ["https://cdn.example/video/chunk-007-0.m4s", "https://cdn.example/video/chunk-008-4.m4s", "https://cdn.example/video/chunk-009-8.m4s"])
+        self.assertEqual(ext, ".mp4")
+
     def test_private_and_non_http_urls_are_rejected(self):
         for url in ("http://127.0.0.1/video.mp4", "http://169.254.169.254/latest/meta-data", "file:///C:/video.mp4", "https://user:secret@example.com/video.mp4"):
             with self.subTest(url=url), self.assertRaises(UnsafeURLError):
