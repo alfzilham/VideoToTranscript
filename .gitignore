@@ -22,6 +22,10 @@ npm-debug.log*
 .env.*
 !.env.example
 !.env.local.example
+google-drive-token.json
+twitch-token.json
+*oauth-client*.json
+client_secret*.json
 
 # Temporary files and generated outputs
 tmp/
