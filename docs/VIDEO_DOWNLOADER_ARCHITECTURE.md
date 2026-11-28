@@ -4,7 +4,7 @@
 
 `/downloader` → `/api/downloader/inspect` → source registry → direct-file, Pytubefix YouTube, authorized Twitch Clip, Google Drive API original, or static HLS/DASH VOD adapter → in-memory inspection ID (15 minute expiry).
 
-`/api/downloader/download` validates the inspection and format ID, rechecks the source, and creates one worker. The worker writes a `.part` file, enforces configured byte and disk limits, validates media with FFprobe and a full FFmpeg decode, computes SHA-256, and atomically renames/saves a manifest. Results remain on disk; transient progress and cancellation state remain in memory.
+`/api/downloader/download` validates the inspection and format ID, rechecks the source, and enqueues a job. One FIFO downloader worker writes a `.part` file, enforces configured byte and disk limits, validates media with FFprobe and a full FFmpeg decode, computes SHA-256, and atomically renames/saves a manifest. Results and job snapshots remain on disk; active cancellation state remains in memory. A nonterminal download found after restart is marked `interrupted` and is not retried.
 
 ## Modules
 
@@ -16,13 +16,15 @@
 - `backend/downloader/adapters/twitch.py`, `backend/downloader/twitch_auth.py`: official Helix Clip inspection/download URLs and Device Code Grant authorization for an authorized editor token; token/refresh data stays in a local user-data file; no generic VOD scraping.
 - `backend/downloader/adapters/google_drive.py`, `backend/downloader/google_drive_auth.py`: Drive API `canDownload` check and original blob transfer using local OAuth Desktop consent.
 - `backend/downloader/adapters/hls_dash.py`: static unencrypted HLS/DASH manifest selection and per-resource validated acquisition; FFmpeg stream-copy mux to Matroska.
-- `backend/downloader/jobs.py`: bounded worker lifecycle, progress, cancellation, cleanup, and final manifest creation.
+- `backend/downloader/jobs.py`: single FIFO worker lifecycle, persisted progress snapshots, queue positions, cancellation, restart recovery, cleanup, and final manifest creation.
 - `backend/downloader/validator.py`: FFprobe metadata, FFmpeg full decode, and SHA-256.
 - `backend/downloader/storage.py`: safe persistent directory/manifest access and history.
 - `backend/downloader/router.py`: `/api/downloader` API and streamed file/range responses.
 - `frontend/components/TopBar.tsx`, `frontend/app/downloader/page.tsx`: shared navigation and downloader UX.
 
 The downloader and transcription job slots are separate. Sending a stored video to transcription passes its existing file path to the old pipeline and gives that pipeline a distinct temporary working directory; transcription cleanup therefore cannot remove the stored original.
+
+Transcription from URL, upload, or a stored downloader result shares one SQLite-backed FIFO worker (`~/.video-to-transcript/job-state.sqlite3`). The worker exposes status and cancellation routes for local clients; each backend process must run with one Uvicorn worker so TimChao and ClipUp coordinate through the same queue. Queued inputs resume after restart if present, while an already active transcription is marked `interrupted` and requires a new request.
 
 ## Native fidelity
 
