@@ -40,13 +40,13 @@ Content-Type: application/json
 {"inspection_id":"<uuid-from-inspect>","format_id":"original"}
 ```
 
-Returns HTTP 202, e.g. `{"job_id":"<uuid>","status":"queued"}`. Poll:
+Returns HTTP 202, e.g. `{"job_id":"<uuid>","status":"queued"}`. Jobs enter a FIFO queue; one download worker runs at a time. Poll:
 
 ```http
 GET /api/downloader/status/<job_id>
 ```
 
-Example status: `{"job_id":"<uuid>","status":"downloading","progress":42,"downloaded_bytes":1200000,"total_bytes":2848208,"speed_bytes_per_second":400000,"eta_seconds":5,"error_code":null,"error_message":null}`. Status values include `queued`, `downloading`, `validating`, `done`, `error`, and `cancelled`. Progress can be null when the source has no known total size.
+Example status: `{"job_id":"<uuid>","status":"downloading","progress":42,"downloaded_bytes":1200000,"total_bytes":2848208,"speed_bytes_per_second":400000,"eta_seconds":5,"error_code":null,"error_message":null,"stage":"downloading","queue_position":0,"worker_available":false,"updated_at":1795852800.0}`. Status values include `queued`, `downloading`, `muxing`, `validating`, `done`, `error`, `cancelled`, and `interrupted`. `stage_progress` carries mux progress (0–99) while `progress` reports acquisition progress; `queue_position` is `0` for the active job, `1..N` for queued jobs, and null for terminal jobs. Acquisition progress can be null when the source has no known total size. `GET /api/downloader/queue` reports `pipeline`, fixed `concurrency: 1`, `worker_available`, `active_job`, `queue`, and `queue_length` without requiring clients to resubmit work.
 
 When status is `done`, request:
 
@@ -69,7 +69,51 @@ Example result (property values vary by source):
 }
 ```
 
-`GET /api/downloader/file/{job_id}` streams the verified original as an attachment. `GET /api/downloader/preview/{job_id}` serves it inline and supports one byte range (`206`, `Content-Range`, `Accept-Ranges`). `GET /api/downloader/metadata/{job_id}` returns the manifest without private filesystem paths. `GET /api/downloader/history` lists completed results. `POST /api/downloader/cancel/{job_id}` requests cancellation and partial-file cleanup.
+`GET /api/downloader/file/{job_id}` streams the verified original as an attachment. `GET /api/downloader/preview/{job_id}` serves it inline and supports one byte range (`206`, `Content-Range`, `Accept-Ranges`). `GET /api/downloader/metadata/{job_id}` returns the manifest without private filesystem paths. `GET /api/downloader/history` lists completed results. `POST /api/downloader/cancel/{job_id}` cancels queued jobs immediately or requests cancellation of active acquisition/validation, then cleans partial files. The response reports the observed `cancelled` or `cancelling` state. A restart marks a nonterminal persisted download `interrupted`; it is not silently restarted.
+
+## Shared transcription queue
+
+The legacy transcription routes remain available and now enqueue instead of rejecting a second request:
+
+```http
+POST /api/process/url
+Content-Type: application/json
+
+{"url":"https://www.youtube.com/watch?v=<id>","model":"small"}
+```
+
+```json
+{"job_id":"<uuid>"}
+```
+
+`POST /api/process/upload` and `POST /api/downloader/transcribe/{download_id}` use the same FIFO transcription worker and retain their prior response shapes. Use `GET /api/status/{job_id}` or `GET /api/jobs/{job_id}` for status. The compatible status response contains `job_id`, `status`, `progress`, `error_message`, and adds `pipeline`, `stage`, `queue_position`, `worker_available`, and `updated_at`. States are `queued`, `downloading`, `extracting`, `transcribing`, `cancelling`, `done`, `error`, `cancelled`, and `interrupted`; queue position is zero for active and one-based for queued jobs.
+
+- `GET /api/jobs` lists jobs without resubmission.
+- `GET /api/worker/status` reports both transcription and download worker availability, active job, FIFO queue, and queue length. Each pipeline has fixed concurrency one.
+- `POST /api/jobs/{job_id}/cancel` cancels queued work immediately or signals the active job to stop at a safe stage boundary. Active FFmpeg/yt-dlp/extraction subprocesses are terminated and reaped; transcript progress cancellation is cooperative. A terminal `done`, `error`, `cancelled`, or `interrupted` state is explicit.
+- Transcription job state and queued inputs are stored in `~/.video-to-transcript/job-state.sqlite3` (override with `VTT_JOB_STATE_DB`). Completed transcript results are persisted there. A queued job resumes after backend restart when its input still exists. A job that had already started is marked `interrupted` because model inference cannot safely resume at its previous point; missing queued input is marked `error`.
+- Download job snapshots are stored under `downloads/.jobs/`; an interrupted download is reported as `interrupted` and partial acquisition is not resumed.
+
+This queue prevents concurrent heavy transcriptions within one backend process and gives TimChao/ClipUp read-only queue visibility. It is local coordination, not a multi-host distributed lock. Run one backend process (`--workers 1`) so both clients share the same worker state.
+
+Both Clipper Agents should point at the same `http://127.0.0.1:8000` instance. Each agent submits its operation once, saves the returned `job_id`, and polls the status/queue endpoints; a busy worker is represented by `queued` plus `queue_position`, so the client must not retry the submit request to discover availability. Check `/api/worker/status` before or after submission for both pipeline snapshots:
+
+```json
+{
+  "transcription": {
+    "pipeline": "transcription", "concurrency": 1, "worker_available": false,
+    "active_job": {"job_id": "<active-uuid>", "status": "transcribing", "stage": "transcribing", "progress": 72, "queue_position": 0},
+    "queue": [{"job_id": "<queued-uuid>", "status": "queued", "stage": "extracting", "progress": 0, "queue_position": 1}],
+    "queue_length": 1
+  },
+  "download": {
+    "pipeline": "download", "concurrency": 1, "worker_available": true,
+    "active_job": null, "queue": [], "queue_length": 0
+  }
+}
+```
+
+Transcription requests retain their previous contract: `POST /api/process/url` accepts `{"url":"https://youtu.be/<id>","model":"small"}`; `POST /api/process/upload` accepts multipart `file` and `model`; `POST /api/downloader/transcribe/{download_id}` accepts `{"model":"small"}`. Each returns `job_id`. Poll `GET /api/status/{job_id}` for backward compatibility or `GET /api/jobs/{job_id}` for the detailed record. Downloads use the existing inspect → download → poll status/result flow; `GET /api/downloader/queue` reports the download worker. After a backend restart, poll the saved job ID: active work is explicitly `interrupted`, queued work may resume, and terminal history remains available from SQLite.
 
 ## Send a result to VTT transcription
 
@@ -84,7 +128,7 @@ Returns HTTP 202 and `{"job_id":"<transcription-job-uuid>"}`. Poll `GET /api/sta
 
 ## Errors
 
-FastAPI error responses use `{"detail":"..."}` and include `X-Error-Code`. Inspection errors include `INVALID_URL`, `UNSUPPORTED_PLATFORM`, `SOURCE_UNAVAILABLE`, `DOWNLOAD_NOT_AVAILABLE`, `INSPECTION_EXPIRED`, and `QUALITY_UNAVAILABLE`. Job errors include `JOB_NOT_FOUND`, `JOB_BUSY`, `FILE_TOO_LARGE`, `INSUFFICIENT_DISK_SPACE`, `DOWNLOAD_FAILED`, `VALIDATION_FAILED`, and `CANCELLED`. HTTP 409 indicates an active/conflicting job or a result not ready; HTTP 404 indicates unknown/expired IDs.
+FastAPI error responses use `{"detail":"..."}` and include `X-Error-Code`. Inspection errors include `INVALID_URL`, `UNSUPPORTED_PLATFORM`, `SOURCE_UNAVAILABLE`, `DOWNLOAD_NOT_AVAILABLE`, `INSPECTION_EXPIRED`, and `QUALITY_UNAVAILABLE`. Job errors include `JOB_NOT_FOUND`, `FILE_TOO_LARGE`, `INSUFFICIENT_DISK_SPACE`, `DOWNLOAD_FAILED`, `VALIDATION_FAILED`, and `CANCELLED`. New jobs are queued instead of returning `JOB_BUSY`; HTTP 409 remains for a result that is not ready or cancellation of a terminal job. HTTP 404 indicates unknown/expired IDs.
 
 ## External Clipper Agent integration
 
