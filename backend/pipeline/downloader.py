@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Event
 from typing import Callable
 
 
@@ -10,7 +11,8 @@ class DownloadFailure(RuntimeError):
 
 
 def download_youtube_audio(
-    url: str, destination: Path, max_bytes: int, on_progress: Callable[[int], None]
+    url: str, destination: Path, max_bytes: int, on_progress: Callable[[int], None],
+    cancel_event: Event | None = None,
 ) -> tuple[Path, str]:
     """Download the best audio-only rendition within an isolated work folder."""
     try:
@@ -22,6 +24,8 @@ def download_youtube_audio(
     destination.mkdir(parents=True, exist_ok=True)
 
     def hook(info: dict) -> None:
+        if cancel_event and cancel_event.is_set():
+            raise InterruptedError("Unduhan YouTube dibatalkan.")
         if info.get("status") == "finished":
             on_progress(29)
             return
