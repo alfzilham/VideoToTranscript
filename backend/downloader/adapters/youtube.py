@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import os
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -126,16 +128,69 @@ class YouTubeAdapter:
                 ffmpeg = shutil.which("ffmpeg")
                 if not ffmpeg:
                     raise RuntimeError("FFmpeg diperlukan untuk menggabungkan track audio/video tanpa re-encoding.")
-                proc = subprocess.Popen([ffmpeg, "-nostdin", "-y", "-i", str(video_path), "-i", str(audio_path), "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-f", "matroska", str(destination)], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-                while proc.poll() is None:
-                    if cancel_event.wait(0.2):
-                        proc.terminate()
-                        try: proc.wait(timeout=3)
-                        except subprocess.TimeoutExpired: proc.kill()
-                        raise InterruptedError("Unduhan dibatalkan.")
-                if proc.returncode:
-                    detail = (proc.stderr.read() if proc.stderr else b"").decode("utf-8", "replace")[-1200:]
-                    raise RuntimeError(f"FFmpeg stream-copy merge gagal: {detail}")
+                if hasattr(report, "set_stage"):
+                    report.set_stage("muxing")
+                timeout_seconds = max(1, int(os.getenv("VTT_YOUTUBE_MUX_TIMEOUT_SECONDS", "3600")))
+                command = [
+                    ffmpeg, "-hide_banner", "-loglevel", "error", "-nostats", "-nostdin", "-y",
+                    "-i", str(video_path), "-i", str(audio_path), "-map", "0:v:0", "-map", "1:a:0",
+                    "-c", "copy", "-progress", "pipe:1", "-f", "matroska", str(destination),
+                ]
+                # A PIPE that is only read after wait() can fill with FFmpeg stats and
+                # block the child forever. A temporary file keeps diagnostics without
+                # back-pressuring FFmpeg or accumulating unbounded output in memory.
+                with tempfile.TemporaryFile() as stderr_log:
+                    proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=stderr_log)
+
+                    def stop_and_reap() -> None:
+                        if proc.poll() is None:
+                            try:
+                                proc.terminate()
+                            except ProcessLookupError:
+                                pass
+                            try:
+                                proc.wait(timeout=5)
+                            except subprocess.TimeoutExpired:
+                                proc.kill()
+                                proc.wait()
+
+                    def read_progress() -> None:
+                        if proc.stdout is None:
+                            return
+                        duration = float(source.duration_seconds or 0)
+                        for line in proc.stdout:
+                            if duration <= 0 or not line.startswith(b"out_time_"):
+                                continue
+                            try:
+                                value = line.split(b"=", 1)[1].strip()
+                                elapsed = int(value) / 1_000_000
+                            except (IndexError, ValueError):
+                                continue
+                            if hasattr(report, "set_stage_progress"):
+                                report.set_stage_progress(min(99, max(0, int(elapsed / duration * 100))))
+                    progress_reader = threading.Thread(target=read_progress, daemon=True, name="vtt-ffmpeg-progress")
+                    progress_reader.start()
+                    try:
+                        deadline = time.monotonic() + timeout_seconds
+                        while proc.poll() is None:
+                            if cancel_event.wait(0.2):
+                                raise InterruptedError("Mux FFmpeg dibatalkan.")
+                            if time.monotonic() >= deadline:
+                                raise TimeoutError(f"Mux FFmpeg melewati batas {timeout_seconds} detik.")
+                        proc.wait()
+                    except BaseException:
+                        stop_and_reap()
+                        raise
+                    finally:
+                        progress_reader.join(timeout=5)
+                        if proc.stdout:
+                            proc.stdout.close()
+                    if proc.returncode:
+                        stderr_log.flush()
+                        stderr_log.seek(0, 2)
+                        stderr_log.seek(max(0, stderr_log.tell() - 1200))
+                        detail = stderr_log.read().decode("utf-8", "replace")[-1200:]
+                        raise RuntimeError(f"FFmpeg stream-copy merge gagal (exit {proc.returncode}): {detail}")
             else:
                 shutil.copyfile(video_path, destination)
             report(destination.stat().st_size, destination.stat().st_size)
