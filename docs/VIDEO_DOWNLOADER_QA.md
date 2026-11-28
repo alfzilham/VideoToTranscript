@@ -1,6 +1,42 @@
 # Video Downloader QA Record
 
-Updated 2026-11-27. Measurements below are from actual downloads in this Windows workspace unless explicitly called a unit test. No acquisition was attempted for the unrelated Terminator URL.
+Updated 2026-11-28. Measurements below are from actual downloads in this Windows workspace unless explicitly called a unit test. No acquisition was attempted for the unrelated Terminator URL.
+
+## Mux reliability and shared workers — 2026-11-28
+
+Evidence reviewed: ClipUp `runs/vtt_uat_20261127_01/uat_report.md` and `runs/vtt_uat_20261127_02/xqc_retry/recovery/recovery_manifest.json`. These files are outside this repository and were read only. The UAT report records both complete xQc tracks and a VTT mux that remained idle for over nine minutes with a zero-byte `.part`; the client then cancelled. The local recovery completed with stream copy. The supplied recovery manifest does not include its exact FFmpeg argv, so a flag-by-flag command comparison cannot be substantiated. The implementation command below is compared against the recorded recovery behavior (local tracks, lossless stream copy, Matroska result).
+
+Root cause: the YouTube adapter previously launched FFmpeg with `stderr=PIPE`, polled the child, and only read stderr after exit. If FFmpeg filled that pipe with logs, the child blocked on write while the parent waited for exit. That lifecycle also had no mux timeout. This matches the observed idle mux/zero-byte output and is supported by the old subprocess implementation; the logs alone do not prove that a specific pipe write was the exact blocked system call.
+
+Targeted fix: stderr now goes to a temporary file, FFmpeg stdout is consumed continuously by a progress reader (`-progress pipe:1`), verbosity/stats output is suppressed, and a configurable `VTT_YOUTUBE_MUX_TIMEOUT_SECONDS` (default 3600) bounds the operation. Cancellation terminates, waits, then kills/reaps after a 5-second grace period. The command keeps `-c copy` and explicit Matroska output; no decoder/encoder or quality conversion is introduced. Mux stage progress is derived from FFmpeg `out_time` and the known duration.
+
+| Check | Result | Evidence |
+|---|---|---|
+| xQc local mux reproduction | PASS | Final adapter mux ran using the already downloaded `video_track.mp4` (471,361,559 bytes) and `audio_track.webm` (12,681,269 bytes) from the supplied recovery run; no network acquisition or external workspace writes. This 14m43s source also exercises a longer mux. Result `tmp/xqc-mux-uat/xqc-final-mux-rerun.mkv.part`, 483,776,680 bytes; mux stage reported 13 progress updates and completed. |
+| xQc source properties retained | PASS | Final FFprobe: Matroska, 883.161 s, H.264 High 1920×1080 yuv420p, ~59.94 fps, plus Opus stereo 48 kHz. Matches the supplied UAT source track properties. FFmpeg uses `-map 0:v:0 -map 1:a:0 -c copy`; source tracks are not re-encoded or overwritten. |
+| xQc complete decode / digest | PASS | `ffmpeg -v error -i <output> -f null NUL` exited 0 across the full 883.161-second video. Final rerun SHA-256: `fbd594435a6e975c17f2a1f343c554d599e7674b990244766a0ccd0b6fa9ee85`. Container metadata may differ from the separate recovery output; byte-identical container SHA is not expected. |
+| Two-client transcription FIFO | PASS (automated API simulation) | Added regression creates requests through two independent FastAPI TestClients concurrently. Both are accepted; queue position is observable, and instrumentation confirms at most one transcription handler runs at once. This tests API concurrency and queue coordination without launching two external ClipUp/TimChao installations. |
+| FIFO, queue monitoring, cancellation, worker release | PASS (automated) | Tests cover queue ordering and position, queued cancellation, active cancellation signal, terminal status, worker availability/release, and request acceptance without using 409 as normal queue control. |
+| Restart recovery | PASS (automated) | Persisted queued transcription inputs resume if present; active transcription is marked `interrupted`; missing queued inputs become `error`. Persisted nonterminal downloads become `interrupted` and are not retried. |
+| Full backend regression suite | PASS | `backend/.venv/Scripts/python.exe -m pytest backend/tests -q --tb=short`: **30 passed** after the current fixes. |
+| Existing service restart/live API check | PASS (2026-11-28) | Reconciled all job IDs in the TimChao and ClipUp checkpoints against their status routes; all reported 404. TimChao job `52436e4e-e425-4e45-a748-5766bdba0d7e` had a temp input/audio directory dated Nov 27, before the current backend process started Nov 28; the directory was left untouched. ClipUp's latest xQc download is terminal-cancelled in its checkpoint; the validated local xQc tracks were not downloaded again. Port 8000 belonged to the project Uvicorn tree; its CPU delta was 0 over 3 seconds. The only backend restart was performed after the recorded jobs were absent and workers had no known active checkpoint. |
+
+## Runtime deployment — 2026-11-28
+
+The final backend is running the current workspace code on `127.0.0.1:8000` (listener PID 2552; project Python 3.11 virtual environment). It uses the standard SQLite path `C:\Users\LENOVO\.video-to-transcript\job-state.sqlite3` with no `VTT_JOB_STATE_DB` override; the database was created at 12,288 bytes. Frontend port 3000 remained active (PID 5916).
+
+| Runtime check | Result | Evidence |
+|---|---|---|
+| OpenAPI | PASS | `GET /openapi.json`: HTTP 200, `Video to Transcript` 1.0.0. |
+| Queue/API routes | PASS | OpenAPI contains `GET /api/jobs`, `GET /api/jobs/{job_id}`, `GET /api/worker/status`, `POST /api/jobs/{job_id}/cancel`, and `GET /api/downloader/queue`. Existing `/api/status/{job_id}` and downloader routes remain present. |
+| Live queue status | PASS | `GET /api/worker/status` reported both pipelines at concurrency 1, no active job, empty queue, and `worker_available: true`; `GET /api/downloader/queue` returned the same download-worker state. After smoke cleanup, `GET /api/jobs` returned an empty list. |
+| Runtime queue position and cancellation | PASS (synthetic, no media) | A synthetic queued row in the default SQLite DB was visible through the running API at queue position 1; cancellation returned `cancelled`, and status became terminal. No transcription or download was submitted. |
+| Default-DB persistence across backend restart | PASS (synthetic, no media) | With both workers idle and queues empty, the backend was restarted. The same synthetic job remained `cancelled` through `GET /api/jobs/{job_id}`; the test row was then removed. This validates the runtime API against the production-default DB path without launching a heavy job. |
+| Frontend smoke | PASS | `GET http://127.0.0.1:3000/downloader`: HTTP 200. No frontend files or UI/UX changed. |
+
+The service remains running after validation. The SQLite database contains no smoke job. No xQc media was re-downloaded; no files in either Clipper workspace were modified.
+
+Download worker API: `GET /api/downloader/queue`; combined status: `GET /api/worker/status`; transcription status/list: `GET /api/jobs`, `GET /api/jobs/{job_id}`; cancellation: `POST /api/jobs/{job_id}/cancel`. See `docs/VIDEO_DOWNLOADER_API.md` for response fields and restart semantics.
 
 ## Environment recovery
 
@@ -15,7 +51,7 @@ Updated 2026-11-27. Measurements below are from actual downloads in this Windows
 
 | Check | Result | Evidence |
 |---|---|---|
-| Backend regression suite | PASS | `backend/.venv/Scripts/python.exe -m pytest -q backend/tests`: 24 passed. Includes API/transcription regressions, downloader URL/security/resource checks, provider parsing, blank OAuth-token defaults, HLS rendition/live guard, DASH templates, cancellation/partial cleanup, and corrupt-media rejection. |
+| Backend regression suite | PASS | Final run: `backend/.venv/Scripts/python.exe -m pytest backend/tests -q --tb=short`: **30 passed**. Includes API/transcription regressions, downloader URL/security/resource checks, provider parsing, blank OAuth-token defaults, HLS rendition/live guard, DASH templates, cancellation/partial cleanup, corrupt-media rejection, FIFO worker coordination, restart recovery, and concurrent-client acceptance. |
 | Direct source/browser acquisition | PASS | UI inspected `https://download.samplelib.com/mp4/sample-5s.mp4`, offered one `original` rendition, and downloaded 2,848,208 bytes from the direct source. No merge was needed. |
 | Direct FFprobe/full decode/SHA-256 | PASS | FFprobe: 1920×1080, 30 FPS, H.264/AAC, duration 5.758549 s, video 3,857,402 bps/audio 127,998 bps. `original_file`, re-encode No, full decode PASS. SHA-256 `05bd857af7f70bf51b6aac1144046973bf3325c9101a554bc27dc9607dbbd8f5`. Preview Range returned 206/1024 bytes; history entry present. |
 | Direct preview delivery and Edge playback | PASS (endpoint playback); prior UI failure not reproduced | Live response: `206 Partial Content`, `Content-Type: video/mp4`, `Accept-Ranges: bytes`, `Content-Length: 1024`, `Content-Range: bytes 0-1023/2848208`, inline disposition. Current Edge loaded the same preview URL as native media and visibly played the 5.758549 s H.264 High, `avc1.640028`, 1920×1080, 30 FPS, yuv420p + AAC-LC MP4 through its final frame. No remux or original-file change was made. The previous page fallback did not reproduce on the current running services; native Edge media page does not expose an HTMLMediaElement `MediaError` object for this playback, so the old transient client-side error code/root cause is not recoverable. |
