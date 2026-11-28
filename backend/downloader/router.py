@@ -141,12 +141,17 @@ def download_status(job_id: str):
         if not manifest:
             _error(404, "JOB_NOT_FOUND", "Job downloader tidak ditemukan.")
         return {"job_id": job_id, "status": "done", "progress": 100, "downloaded_bytes": manifest["file_size_bytes"], "total_bytes": manifest["file_size_bytes"], "speed_bytes_per_second": None, "eta_seconds": 0, "error_code": None, "error_message": None}
+    with manager.lock:
+        queue_position = (manager.queue.index(job_id) + 1) if job_id in manager.queue else (0 if job_id in manager.active else None)
+    worker_available = manager.worker_status()["worker_available"]
     with job.lock:
         return {
             "job_id": job.job_id, "status": job.status, "progress": job.progress,
             "downloaded_bytes": job.downloaded_bytes, "total_bytes": job.total_bytes,
             "speed_bytes_per_second": job.speed_bytes_per_second, "eta_seconds": job.eta_seconds,
             "error_code": job.error_code, "error_message": job.error_message,
+            "stage": job.stage, "stage_progress": job.stage_progress, "queue_position": queue_position,
+            "worker_available": worker_available, "updated_at": job.updated_at,
         }
 
 
@@ -243,10 +248,11 @@ def download_metadata(job_id: str):
 def cancel_download(job_id: str):
     if not manager.cancel(job_id):
         job = manager.get(job_id)
-        if job and job.status in {"done", "error", "cancelled"}:
+        if job and job.status in {"done", "error", "cancelled", "interrupted"}:
             _error(409, "CANCELLED", "Job sudah selesai dan tidak dapat dibatalkan.")
         _error(404, "JOB_NOT_FOUND", "Job downloader tidak ditemukan.")
-    return {"job_id": job_id, "status": "cancelling"}
+    job = manager.get(job_id)
+    return {"job_id": job_id, "status": job.status if job else "cancelled"}
 
 
 @router.get("/history")
@@ -255,3 +261,8 @@ def download_history():
         {key: value for key, value in item.items() if not key.startswith("_") and key != "relative_path"}
         for item in storage.list_manifests()
     ]
+
+
+@router.get("/queue")
+def download_queue():
+    return manager.worker_status()
