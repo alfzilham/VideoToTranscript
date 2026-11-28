@@ -29,17 +29,17 @@ def test_formatter() -> None:
     assert safe_filename("C:\\folder\\my<video>?.MP4") == "myvideo.txt"
 
 
-def test_single_active_job() -> None:
-    jobs = JobStore()
+def test_fifo_job_store_accepts_a_second_queued_job(tmp_path) -> None:
+    jobs = JobStore(tmp_path / "jobs.sqlite3")
     one = jobs.create("extracting")
-    try:
-        jobs.create("downloading")
-        assert False, "Must reject a second active job"
-    except RuntimeError:
-        pass
+    two = jobs.create("downloading")
+    assert one.status == two.status == "queued"
+    assert jobs.get(one.id).queue_position == 1
+    assert jobs.get(two.id).queue_position == 2
     jobs.update(one.id, status="done", progress=100, transcript="text", filename_suggestion="a.txt")
     assert jobs.get(one.id).status == "done"
-    assert jobs.create("extracting").id != one.id
+    assert jobs.get(two.id).queue_position == 1
+    assert jobs.create("extracting").id not in {one.id, two.id}
 
 
 def test_api_validation_and_not_found() -> None:
@@ -54,7 +54,7 @@ def test_upload_pipeline_mock(tmp_path, monkeypatch) -> None:
     """Run a real API upload and worker with media stages mocked (no network/model)."""
     from backend import main
 
-    def fake_extractor(source, destination):
+    def fake_extractor(source, destination, cancel_event=None):
         destination.write_bytes(b"mock WAV")
         return destination
 
@@ -73,9 +73,10 @@ def test_upload_pipeline_mock(tmp_path, monkeypatch) -> None:
     response = client.post("/api/process/upload", files={"file": ("rekaman.mp4", b"fake video content", "video/mp4")})
     assert response.status_code == 202
     job_id = response.json()["job_id"]
-    assert client.get(f"/api/status/{job_id}").json() == {
-        "status": "done", "progress": 100, "error_message": None
-    }
+    status = client.get(f"/api/status/{job_id}").json()
+    assert status["status"] == "done", status
+    assert status["progress"] == 100 and status["error_message"] is None
+    assert status["job_id"] == job_id and status["stage"] == "done"
     assert client.get(f"/api/result/{job_id}").json() == {
         "transcript": "[00:00:02] halo dunia", "filename_suggestion": "rekaman.txt"
     }
@@ -96,7 +97,7 @@ def test_youtube_pipeline_mock_and_cleanup(monkeypatch) -> None:
 
     observed: list[Path] = []
 
-    def fake_downloader(url, destination, max_bytes, callback):
+    def fake_downloader(url, destination, max_bytes, callback, cancel_event=None):
         assert "youtu.be" in url
         source = destination / "source.webm"
         source.write_bytes(b"youtube media")
@@ -104,7 +105,7 @@ def test_youtube_pipeline_mock_and_cleanup(monkeypatch) -> None:
         callback(29)
         return source, "Talk: Introduction"
 
-    def fake_extractor(source, destination):
+    def fake_extractor(source, destination, cancel_event=None):
         assert source.suffix == ".webm"
         destination.write_bytes(b"converted wav")
         return destination
@@ -149,3 +150,62 @@ def test_pipeline_error_releases_slot(monkeypatch) -> None:
     assert client.get(f"/api/result/{job_id}").status_code == 409
     assert store.active_id is None
     assert observed and not observed[0].exists()
+
+
+def test_two_api_clients_are_accepted_and_processed_fifo(monkeypatch):
+    """Two simultaneous ClipUp-style clients queue without 409 and share one Whisper worker."""
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    from backend import main
+
+    first_started = threading.Event()
+    release_first = threading.Event()
+    counter_lock = threading.Lock()
+    active = 0
+    peak = 0
+    calls = 0
+
+    def fake_transcriber(_source, _model, callback):
+        nonlocal active, peak, calls
+        with counter_lock:
+            active += 1
+            calls += 1
+            peak = max(peak, active)
+            call = calls
+        if call == 1:
+            first_started.set()
+            assert release_first.wait(3)
+        callback(97)
+        with counter_lock:
+            active -= 1
+        return [{"start": call, "end": call + 1, "text": f"job {call}"}]
+
+    monkeypatch.setattr(main, "transcribe", fake_transcriber)
+    first_client, second_client = TestClient(app), TestClient(app)
+    with first_client, second_client:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first_future = pool.submit(first_client.post, "/api/process/upload", files={"file": ("one.wav", b"one", "audio/wav")})
+            first_response = first_future.result(timeout=3)
+            assert first_response.status_code == 202
+            first_id = first_response.json()["job_id"]
+            assert first_started.wait(2)
+
+            second_future = pool.submit(second_client.post, "/api/process/upload", files={"file": ("two.wav", b"two", "audio/wav")})
+            second_response = second_future.result(timeout=3)
+            assert second_response.status_code == 202
+            second_id = second_response.json()["job_id"]
+            second_status = first_client.get(f"/api/status/{second_id}").json()
+            assert second_status["status"] == "queued"
+            assert second_status["queue_position"] == 1
+            assert second_status["stage"] == "extracting"
+            worker = first_client.get("/api/worker/status").json()["transcription"]
+            assert worker["active_job"]["job_id"] == first_id
+            assert worker["queue"][0]["job_id"] == second_id
+
+            release_first.set()
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and (store.get(first_id).status != "done" or store.get(second_id).status != "done"):
+                time.sleep(0.01)
+            assert store.get(first_id).status == store.get(second_id).status == "done"
+            assert peak == 1
