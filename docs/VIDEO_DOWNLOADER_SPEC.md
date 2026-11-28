@@ -26,7 +26,7 @@ Production readiness: **PASS** for the supported downloader and transcription wo
 ## Resource defaults
 
 - `VTT_DOWNLOAD_MAX_BYTES`: 10 GiB.
-- `VTT_DOWNLOAD_MAX_CONCURRENT`: 1.
+- Downloader worker concurrency: fixed at one job, with FIFO queue and status polling (`GET /api/downloader/queue`).
 - `VTT_DOWNLOAD_INSPECTION_TTL`: 900 seconds.
 - `VTT_DOWNLOAD_DIR`: project `downloads/` directory.
 
