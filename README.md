@@ -63,7 +63,7 @@ python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
 
 Backend tersedia di `http://127.0.0.1:8000`. Dokumentasi REST API: `http://127.0.0.1:8000/docs`.
 
-**Penting:** Jalankan **satu** proses Uvicorn saja (`--workers 1` jika memberi parameter worker). Job disimpan di RAM proses, sehingga `--reload`/restart akan menghapus status dan hasil job sebelumnya. Jangan mulai job baru sebelum job aktif selesai.
+**Penting:** Jalankan **satu** proses Uvicorn saja (`--workers 1` jika memberi parameter worker), agar TimChao dan ClipUp berbagi antrean lokal yang sama. Job transkripsi menggunakan antrean FIFO dengan satu worker; job unduhan juga memakai satu worker tersendiri. Status dan hasil transkrip disimpan di `~/.video-to-transcript/job-state.sqlite3` (dapat diubah dengan `VTT_JOB_STATE_DB`). Job antrean dapat dilanjutkan sesudah restart jika inputnya masih tersedia; job yang sudah berjalan ditandai `interrupted` karena inferensi tidak dapat dilanjutkan dari titik sebelumnya. Unduhan aktif juga ditandai `interrupted`, tidak diulang otomatis.
 
 ## 3. Jalankan frontend (Next.js)
 
@@ -122,10 +122,32 @@ Jika batas ukuran backend diubah, **sesuaikan `NEXT_PUBLIC_MAX_UPLOAD_BYTES`** a
 | `POST` | `/api/process/upload` | Multipart `file` + `model`; mengembalikan `job_id` |
 | `GET` | `/api/status/{job_id}` | `status`, `progress` (0–100), `error_message` |
 | `GET` | `/api/result/{job_id}` | Hasil `transcript` dan `filename_suggestion` saat status `done` |
+| `GET` | `/api/jobs` dan `/api/jobs/{job_id}` | Daftar dan detail job termasuk stage, posisi antrean, dan worker availability |
+| `GET` | `/api/worker/status` | Status worker transkripsi dan unduhan, job aktif, antrean FIFO |
+| `POST` | `/api/jobs/{job_id}/cancel` | Batalkan job antrean atau minta pembatalan job aktif |
 
 Downloader endpoints use the `/api/downloader` prefix. See [docs/VIDEO_DOWNLOADER_API.md](docs/VIDEO_DOWNLOADER_API.md) for inspection, download, status, validation, preview, history, cancellation, and transcript handoff routes.
 
-Hanya satu job boleh aktif. Permintaan baru ketika job masih berjalan mendapat respons HTTP `409`. Progres transkripsi berbasis segmen dan merupakan **perkiraan**, bukan ETA. Hasil tersimpan di memori sampai server backend dihentikan; media sementara dibersihkan otomatis setelah selesai/gagal.
+Permintaan job baru masuk antrean dan mengembalikan `job_id`; client dapat memantau `/api/jobs`, `/api/status/{job_id}`, atau `/api/worker/status` tanpa mengirim ulang pekerjaan. Status meliputi `queued`, stage aktif, dan status terminal `done`, `error`, `cancelled`, atau `interrupted`. Progres transkripsi berbasis segmen dan merupakan **perkiraan**, bukan ETA. Hasil transkrip serta status disimpan lokal dalam SQLite; media input sementara dibersihkan setelah selesai/gagal.
+
+### Kontrak worker untuk TimChao dan ClipUp
+
+Kedua Clipper Agent harus memakai instance VTT lokal yang sama di `http://127.0.0.1:8000`. Sebelum mengirim pekerjaan baru, agent dapat membaca `GET /api/worker/status` dan `GET /api/jobs`; setelah menerima `job_id`, agent mem-poll status ID tersebut dan tidak mengirim ulang request hanya karena antrean sedang sibuk. Satu worker transkripsi memproses maksimum satu Whisper job pada satu waktu; job lain menunggu FIFO. Worker downloader memiliki antrean terpisah dengan konkurensi satu.
+
+```json
+{
+  "transcription": {
+    "pipeline": "transcription", "concurrency": 1,
+    "worker_available": false,
+    "active_job": {"job_id": "<uuid>", "status": "transcribing", "stage": "transcribing", "progress": 72, "queue_position": 0},
+    "queue": [{"job_id": "<uuid>", "status": "queued", "stage": "extracting", "progress": 0, "queue_position": 1}],
+    "queue_length": 1
+  },
+  "download": {"pipeline": "download", "concurrency": 1, "worker_available": true, "active_job": null, "queue": [], "queue_length": 0}
+}
+```
+
+Kontrak request lama tetap berlaku: `/api/process/url` menerima `{"url":"https://youtu.be/<id>","model":"small"}`, `/api/process/upload` menerima multipart `file` + `model`, dan `/api/downloader/transcribe/{download_id}` menerima `{"model":"small"}`. Setiap route mengembalikan `job_id`; gunakan `/api/status/{job_id}` atau `/api/jobs/{job_id}` untuk stage/status, dan `POST /api/jobs/{job_id}/cancel` untuk pembatalan. Unduhan mengikuti inspect → download → `GET /api/downloader/status/{job_id}`; status antrean umum downloader ada di `GET /api/downloader/queue`. Rincian field dan contoh respons ada di [API contract](docs/VIDEO_DOWNLOADER_API.md). Perilaku runtime terbaru diverifikasi pada 28 Nov 2026; bukti dan batas uji dicatat di [QA record](docs/VIDEO_DOWNLOADER_QA.md).
 
 ## 7. Video Downloader
 
@@ -180,8 +202,8 @@ Pengaturan opsional backend (environment variables saat menjalankan dari root pr
 |---|---:|---|
 | `VTT_DOWNLOAD_DIR` | `downloads` | Lokasi media dan manifest; relative path dihitung dari working directory proses backend |
 | `VTT_DOWNLOAD_MAX_BYTES` | `10737418240` | Batas ukuran unduhan (10 GiB) |
-| `VTT_DOWNLOAD_MAX_CONCURRENT` | `1` | Jumlah job downloader aktif |
 | `VTT_DOWNLOAD_INSPECTION_TTL` | `900` | Masa berlaku hasil inspeksi (detik) |
+| `VTT_JOB_STATE_DB` | `~/.video-to-transcript/job-state.sqlite3` | Lokasi SQLite untuk status, antrean, dan hasil transkrip |
 | `VTT_TWITCH_CLIENT_ID` | — | Twitch application Client ID untuk Clip API |
 | `VTT_TWITCH_ACCESS_TOKEN` | — | Twitch User Access Token untuk editor/broadcaster berwenang |
 | `VTT_TWITCH_TOKEN_FILE` | `~/.video-to-transcript/twitch-token.json` | Access/refresh token Twitch lokal dari Device Code Flow |
@@ -218,7 +240,9 @@ npm run build
 - Upload sampel audio `.wav` dan video `.mp4`, lalu pastikan baris bertimestamp, copy dan download bekerja.
 - Coba URL YouTube publik yang boleh diunduh, dengan durasi pendek, lalu video ±10 menit.
 - Coba URL salah, video private, file berekstensi tidak didukung, dan file melampaui batas.
-- Jika sedang ada job aktif, periksa bahwa permintaan job lain ditolak dan folder sementara telah dibersihkan.
+- Kirim dua permintaan job dari client berbeda; pastikan job kedua mendapat posisi FIFO dan worker hanya memproses satu job.
+- Periksa `/api/worker/status`, batalkan job antrean dan job aktif, lalu pastikan worker tersedia kembali dan status terminal sesuai.
+- Restart backend hanya saat tidak ada pekerjaan aktif; pastikan queued job yang input-nya tersedia dilanjutkan dan job terinterupsi dilaporkan eksplisit.
 
 **Catatan:** Pengujian end-to-end dengan Whisper asli dan YouTube membutuhkan model, file media nyata, dan koneksi internet; tes otomatis offline tidak menggantikannya. Kinerja pada Ryzen 7 5825U CPU-only sangat bergantung pada durasi dan kualitas audio.
 
