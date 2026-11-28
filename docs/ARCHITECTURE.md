@@ -32,7 +32,7 @@ Aplikasi terdiri dari 2 komponen utama yang berjalan lokal:
 
 ### 2.2 Backend — FastAPI (Python)
 - Menerima request dari frontend (URL atau file upload).
-- Mengelola job pemrosesan secara in-memory (dictionary `job_id` → status), karena hanya single-user dan tidak butuh database persisten.
+- Mengelola job dengan antrean FIFO satu worker dan status persisten pada SQLite lokal (`~/.video-to-transcript/job-state.sqlite3`), agar client lokal bersama dapat memantau antrean dan status terminal setelah restart.
 - Menjalankan pipeline pemrosesan:
   1. `yt-dlp` (jika input URL) — download video/audio.
   2. `ffmpeg` — ekstraksi audio ke `.wav`.
@@ -69,7 +69,7 @@ Output disimpan di job result, siap diambil frontend
 | FastAPI untuk backend | Python native, kompatibel langsung dengan `yt-dlp`, `ffmpeg-python`, dan `faster-whisper` tanpa perlu binding lintas bahasa |
 | Next.js untuk frontend | Sesuai preferensi, developer experience baik, mudah dikembangkan jadi fitur tambahan nantinya |
 | `faster-whisper` bukan `openai-whisper` | Implementasi CTranslate2 jauh lebih cepat di CPU (tanpa GPU/CUDA, sesuai spek laptop pengguna: AMD Ryzen 7 5825U, integrated graphics) |
-| Job disimpan in-memory, bukan database | Skala personal, single-user, tidak butuh persistensi lintas restart server |
+| SQLite lokal untuk status, antrean, dan hasil transkrip; satu worker per pipeline | Mendukung TimChao dan ClipUp pada satu backend lokal tanpa inferensi Whisper paralel; job aktif yang terhenti saat restart dilaporkan `interrupted` |
 | Tidak ada WebSocket, pakai polling | Lebih sederhana untuk implementasi awal; job pemrosesan video tidak butuh update real-time per detik, polling tiap beberapa detik cukup |
 | File temporary dibersihkan otomatis | Mencegah penumpukan file video/audio besar di laptop pengguna |
 
@@ -84,7 +84,7 @@ video-to-transcript/
 │   │   ├── extractor.py        # wrapper ffmpeg
 │   │   ├── transcriber.py      # wrapper faster-whisper
 │   │   └── formatter.py        # format segmen → teks timestamp
-│   ├── jobs.py                 # job state management (in-memory)
+│   ├── jobs.py                 # SQLite-backed FIFO transcription job state
 │   └── requirements.txt
 ├── frontend/
 │   ├── app/
