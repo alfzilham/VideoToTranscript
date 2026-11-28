@@ -238,10 +238,76 @@ high.m3u8
                 job = manager.create_and_start({"size_bytes": None, "platform": "direct", "source": object(), "title": "Cancel", "filename": "cancel.mp4"}, WaitingAdapter(), "original")
                 self.assertTrue(manager.cancel(job.job_id))
                 deadline = time.monotonic() + 5
-                while time.monotonic() < deadline and job.status not in {"done", "error", "cancelled"}:
+                while time.monotonic() < deadline and (job.status not in {"done", "error", "cancelled"} or job.job_id in manager.active):
                     time.sleep(0.02)
                 self.assertEqual(job.status, "cancelled")
                 self.assertNotIn(job.job_id, manager.active)
+
+    def test_download_queue_is_fifo_and_reports_queue_position(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "downloads"
+            fixture = Path(temporary) / "fixture.mp4"
+            subprocess.run([
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+                "-i", "color=c=black:s=32x24:r=2:d=1", "-an", "-c:v", "mpeg4", str(fixture),
+            ], check=True, capture_output=True, timeout=20)
+            contents = fixture.read_bytes()
+            started, release = threading.Event(), threading.Event()
+            second_called = threading.Event()
+
+            class WaitingAdapter:
+                def download(self, source, destination, report, cancel_event):
+                    started.set()
+                    while not release.wait(0.01):
+                        if cancel_event.is_set():
+                            raise InterruptedError("cancelled")
+                    destination.write_bytes(contents)
+                    report(len(contents), len(contents))
+
+            class MustNotRunAdapter:
+                def download(self, source, destination, report, cancel_event):
+                    second_called.set()
+
+            with patch.object(storage, "ROOT", root):
+                manager = DownloadJobManager()
+                first = manager.create_and_start({"size_bytes": len(contents), "platform": "direct", "source": object(), "title": "First", "filename": "first.mp4"}, WaitingAdapter(), "original")
+                self.assertTrue(started.wait(2))
+                second = manager.create_and_start({"size_bytes": None, "platform": "direct", "source": object(), "title": "Second", "filename": "second.mp4"}, MustNotRunAdapter(), "original")
+                self.assertEqual(manager.get(second.job_id).queue_position, 1)
+                snapshot = manager.worker_status()
+                self.assertEqual(snapshot["active_job"]["job_id"], first.job_id)
+                self.assertEqual(snapshot["queue"][0]["job_id"], second.job_id)
+                self.assertTrue(manager.cancel(second.job_id))
+                self.assertEqual(manager.get(second.job_id).status, "cancelled")
+                release.set()
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline and first.status not in {"done", "error", "cancelled"}:
+                    time.sleep(0.02)
+                self.assertEqual(first.status, "done", first.error_message)
+                self.assertFalse(second_called.is_set())
+                while time.monotonic() < deadline and not manager.worker_status()["worker_available"]:
+                    time.sleep(0.02)
+                self.assertTrue(manager.worker_status()["worker_available"])
+
+    def test_download_state_marks_inflight_job_interrupted_after_restart(self):
+        import json
+        import uuid
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "downloads"
+            state_dir = root / ".jobs"
+            state_dir.mkdir(parents=True)
+            job_id = str(uuid.uuid4())
+            (state_dir / f"{job_id}.json").write_text(json.dumps({
+                "job_id": job_id, "status": "validating", "stage": "validating", "progress": 99,
+                "downloaded_bytes": 1234, "total_bytes": 1234, "created_at": 1, "updated_at": 2,
+            }), encoding="utf-8")
+            with patch.object(storage, "ROOT", root):
+                manager = DownloadJobManager()
+                recovered = manager.get(job_id)
+                self.assertEqual(recovered.status, "interrupted")
+                self.assertEqual(recovered.error_code, "BACKEND_RESTARTED")
+                self.assertEqual(recovered.stage, "interrupted")
 
     def test_corrupt_download_is_rejected_and_partial_is_removed(self):
         with tempfile.TemporaryDirectory() as temporary:
